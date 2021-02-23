@@ -1539,6 +1539,7 @@ static VALUE ruby_curl_easy_password_get(VALUE self, VALUE password) {
  *   Curl::CURL_SSLVERSION_TLSv1_0
  *   Curl::CURL_SSLVERSION_TLSv1_1
  *   Curl::CURL_SSLVERSION_TLSv1_2
+ *   Curl::CURL_SSLVERSION_TLSv1_3
  */
 static VALUE ruby_curl_easy_ssl_version_set(VALUE self, VALUE ssl_version) {
   CURB_IMMED_SETTER(ruby_curl_easy, ssl_version, -1);
@@ -2955,7 +2956,7 @@ static VALUE ruby_curl_easy_connect_time_get(VALUE self) {
  * Retrieve the time, in seconds, it took from the start until the SSL/SSH
  * connect/handshake to the remote host was completed. This time is most often
  * very near to the pre transfer time, except for cases such as HTTP
- * pippelining where the pretransfer time can be delayed due to waits in line
+ * pipelining where the pretransfer time can be delayed due to waits in line
  * for the pipeline and more.
  */
 #if defined(HAVE_CURLINFO_APPCONNECT_TIME)
@@ -3596,7 +3597,7 @@ static VALUE ruby_curl_easy_set_opt(VALUE self, VALUE opt, VALUE val) {
 #endif
 #if HAVE_CURLOPT_HAPROXYPROTOCOL
   case CURLOPT_HAPROXYPROTOCOL:
-    curl_easy_setopt(rbce->curl, HAVE_CURLOPT_HAPROXYPROTOCOL, NUM2LONG(val));
+    curl_easy_setopt(rbce->curl, CURLOPT_HAPROXYPROTOCOL, NUM2LONG(val));
     break;
 #endif
   case CURLOPT_STDERR:
@@ -3606,6 +3607,11 @@ static VALUE ruby_curl_easy_set_opt(VALUE self, VALUE opt, VALUE val) {
     GetOpenFile(val, open_f_ptr);
     curl_easy_setopt(rbce->curl, CURLOPT_STDERR, rb_io_stdio_file(open_f_ptr));
     break;
+#if HAVE_CURLOPT_SSL_SESSIONID_CACHE
+  case CURLOPT_SSL_SESSIONID_CACHE:
+    curl_easy_setopt(rbce->curl, CURLOPT_SSL_SESSIONID_CACHE, NUM2LONG(val));
+    break;
+#endif
   default:
     rb_raise(rb_eTypeError, "Curb unsupported option");
   }
