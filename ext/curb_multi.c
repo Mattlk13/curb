@@ -687,12 +687,14 @@ static const char *cselect_flags_str(int flags, char *buf, size_t n) {
 #define cselect_flags_str(...) ""
 #endif
 
+#if defined(HAVE_RB_FIBER_SCHEDULER_IO_WAIT) && defined(HAVE_RB_FIBER_SCHEDULER_CURRENT)
 /* Protected call to rb_fiber_scheduler_io_wait to avoid unwinding into C on TypeError. */
 struct fiber_io_wait_args { VALUE scheduler; VALUE io; int events; VALUE timeout; };
 static VALUE fiber_io_wait_protected(VALUE argp) {
   struct fiber_io_wait_args *a = (struct fiber_io_wait_args *)argp;
   return rb_fiber_scheduler_io_wait(a->scheduler, a->io, a->events, a->timeout);
 }
+#endif
 
 static int multi_socket_cb(CURL *easy, curl_socket_t s, int what, void *userp, void *socketp) {
   multi_socket_ctx *ctx = (multi_socket_ctx *)userp;
