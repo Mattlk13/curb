@@ -829,6 +829,10 @@ static VALUE ruby_curl_easy_clone(VALUE self) {
 
   /* now deep copy */
   newrbce->curl = curl_easy_duphandle(rbce->curl);
+  if (!newrbce->curl) {
+    free(newrbce);
+    rb_raise(rb_eNoMemError, "Failed to duplicate Curl::Easy handle");
+  }
   newrbce->curl_headers = (rbce->curl_headers) ? duplicate_curl_slist(rbce->curl_headers) : NULL;
   newrbce->curl_proxy_headers = (rbce->curl_proxy_headers) ? duplicate_curl_slist(rbce->curl_proxy_headers) : NULL;
   newrbce->curl_ftp_commands = (rbce->curl_ftp_commands) ? duplicate_curl_slist(rbce->curl_ftp_commands) : NULL;
@@ -1367,12 +1371,21 @@ static VALUE ruby_curl_easy_put_data_set(VALUE self, VALUE data) {
   ruby_curl_easy *rbce;
   CURL *curl;
   VALUE upload;
+  VALUE upload_stream = data;
   VALUE headers;
 
   TypedData_Get_Struct(self, ruby_curl_easy, &ruby_curl_easy_data_type, rbce);
 
+  if (!NIL_P(data) && !rb_respond_to(data, rb_intern("read"))) {
+    if (rb_respond_to(data, rb_intern("to_s"))) {
+      upload_stream = rb_obj_as_string(data);
+    } else {
+      rb_raise(rb_eRuntimeError, "PUT data must respond to read or to_s");
+    }
+  }
+
   upload = ruby_curl_upload_new(cCurlUpload);
-  ruby_curl_upload_stream_set(upload,data);
+  ruby_curl_upload_stream_set(upload, upload_stream);
 
   curl = rbce->curl;
   rb_easy_set("upload", upload); /* keep the upload object alive as long as
@@ -1430,7 +1443,7 @@ static VALUE ruby_curl_easy_put_data_set(VALUE self, VALUE data) {
     }
   }
   else if (rb_respond_to(data, rb_intern("to_s"))) {
-    curl_easy_setopt(curl, CURLOPT_INFILESIZE, RSTRING_LEN(data));
+    curl_easy_setopt(curl, CURLOPT_INFILESIZE, RSTRING_LEN(upload_stream));
     if( rb_hash_aref(headers, rb_str_new2("Expect")) == Qnil ) {
       rb_hash_aset(headers, rb_str_new2("Expect"), rb_str_new2(""));
     }

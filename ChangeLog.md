@@ -1,4 +1,8 @@
 # ChangeLog
+## 1.3.3
+* Fix `Curl::Easy#put_data=` with non-String `to_s` payloads so upload length calculation does not read non-String objects as Ruby strings.
+* Guard `Curl::Easy#clone` against `curl_easy_duphandle` allocation failure so clone raises `NoMemError` instead of dereferencing a NULL handle.
+
 ## 1.3.2
 * Fix `Curl::PostField` GC marking so block-backed content fields remain valid across GC and compaction.
 * Fix upload read/seek callbacks to preserve Ruby exceptions, avoid unsafe unwinds through libcurl, and reject reads larger than libcurl's supplied buffer.

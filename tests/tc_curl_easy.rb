@@ -1376,6 +1376,15 @@ class TestCurbCurlEasy < Test::Unit::TestCase
     assert_match(/message$/, curl.body_str)
   end
 
+  def test_put_data_from_to_s_object
+    curl = Curl::Easy.new(TestServlet.url)
+    curl.put_data = :message
+
+    curl.perform
+
+    assert_equal "PUT\nmessage", curl.body_str
+  end
+
   def test_put_data_read_exception_sets_result_and_releases_callback_state
     error_class = Class.new(StandardError)
     reader_class = Class.new do
