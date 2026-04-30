@@ -16,6 +16,9 @@ typedef struct {
   int active;
   int running;
   char closed;
+  char perform_active;
+  char callback_active;
+  char allow_close_during_perform;
   CURLM *handle;
   struct st_table *attached;
 } ruby_curl_multi;

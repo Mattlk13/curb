@@ -2,6 +2,13 @@
 ## 1.3.3
 * Fix `Curl::Easy#put_data=` with non-String `to_s` payloads so upload length calculation does not read non-String objects as Ruby strings.
 * Guard `Curl::Easy#clone` against `curl_easy_duphandle` allocation failure so clone raises `NoMemError` instead of dereferencing a NULL handle.
+* Guard `Curl::Multi` lifecycle during active `perform` calls so closing a multi handle from callbacks or perform blocks raises instead of freeing an in-use libcurl multi handle.
+* Reject adding an active `Curl::Easy` handle to a second `Curl::Multi` before setup mutates request state.
+* Restore one-shot request state for `HEAD`, `PATCH`, and `PUT` requests after success or callback/error unwinds so later requests do not inherit stale method/body options.
+* Validate `Curl::Easy#put_data=` before mutating libcurl upload options, preventing failed setup paths from leaving stale upload callbacks installed.
+* Preserve `CURLOPT_RESOLVE` values set through `Easy#set` across repeated performs, and allow resolve/FTP command entries that convert to strings.
+* Fix older build fallback paths for `curl_multi_wait` and no-GVL `select`.
+* Add regression coverage for multi lifecycle guards, active easy reuse, request state cleanup, upload setup rollback, resolve persistence, and string-convertible resolve/FTP command entries.
 
 ## 1.3.2
 * Fix `Curl::PostField` GC marking so block-backed content fields remain valid across GC and compaction.

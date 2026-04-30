@@ -123,6 +123,50 @@ class TestCurbCurlEasy < Test::Unit::TestCase
     assert_equal "", easy.body_str.to_s
   end
 
+  def test_head_request_restores_easy_state_after_callback_exception
+    easy = Curl::Easy.new(TestServlet.url)
+    easy.on_complete { raise "head complete blew up" }
+
+    error = assert_raise(Curl::Err::AbortedByCallbackError) { easy.http("HEAD") }
+    assert_equal "head complete blew up", error.message
+
+    easy.on_complete { |_curl| }
+    easy.perform
+
+    assert_equal "GET", easy.body_str
+  end
+
+  def test_patch_request_does_not_leak_custom_method_to_next_perform
+    easy = Curl::Easy.new(TestServlet.url)
+
+    easy.http_patch("a=b")
+    assert_equal "PATCH\na=b", easy.body_str
+
+    easy.perform
+    assert_equal "GET", easy.body_str
+  end
+
+  def test_put_request_does_not_leak_custom_method_to_next_perform
+    easy = Curl::Easy.new(TestServlet.url)
+
+    easy.http_put("payload")
+    assert_equal "PUT\npayload", easy.body_str
+
+    easy.perform
+    assert_equal "GET", easy.body_str
+  end
+
+  def test_failed_put_data_setup_does_not_leave_easy_in_upload_mode
+    easy = Curl::Easy.new(TestServlet.url)
+    easy.headers = ["X-Test: true"]
+
+    assert_raise(RuntimeError) { easy.put_data = "payload" }
+
+    easy.headers = {}
+    easy.perform
+    assert_equal "GET", easy.body_str
+  end
+
   def test_perform_releases_failed_implicit_multi_without_follow_up_easy_perform
     Curl::Easy.flush_deferred_multi_closes
     assert_equal 0, Curl::Easy.deferred_multi_closes.length

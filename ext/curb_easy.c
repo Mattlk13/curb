@@ -1373,8 +1373,19 @@ static VALUE ruby_curl_easy_put_data_set(VALUE self, VALUE data) {
   VALUE upload;
   VALUE upload_stream = data;
   VALUE headers;
+  VALUE infile_size = Qnil;
 
   TypedData_Get_Struct(self, ruby_curl_easy, &ruby_curl_easy_data_type, rbce);
+
+  /*
+   * Validate and prepare Ruby-visible state before mutating the CURL handle.
+   * Several branches below can raise (header type, stat, size, to_s).
+   */
+  if (!rb_easy_nil("headers")) {
+    if (rb_easy_type_check("headers", T_ARRAY) || rb_easy_type_check("headers", T_STRING)) {
+      rb_raise(rb_eRuntimeError, "Must set headers as a HASH to modify the headers in an PUT request");
+    }
+  }
 
   if (!NIL_P(data) && !rb_respond_to(data, rb_intern("read"))) {
     if (rb_respond_to(data, rb_intern("to_s"))) {
@@ -1383,6 +1394,46 @@ static VALUE ruby_curl_easy_put_data_set(VALUE self, VALUE data) {
       rb_raise(rb_eRuntimeError, "PUT data must respond to read or to_s");
     }
   }
+
+  headers = rb_easy_get("headers");
+  if( headers == Qnil ) {
+    headers = rb_hash_new();
+  }
+
+  if (!NIL_P(data) && rb_respond_to(data, rb_intern("read"))) {
+    VALUE stat = Qnil;
+    if (rb_respond_to(data, rb_intern("stat"))) {
+      stat = rb_funcall(data, rb_intern("stat"), 0);
+    }
+    if(!NIL_P(stat) && stat != Qfalse && rb_hash_aref(headers, rb_str_new2("Content-Length")) == Qnil) {
+      VALUE size;
+      if( rb_hash_aref(headers, rb_str_new2("Expect")) == Qnil ) {
+        rb_hash_aset(headers, rb_str_new2("Expect"), rb_str_new2(""));
+      }
+      size = rb_funcall(stat, rb_intern("size"), 0);
+      infile_size = size;
+    }
+    else if( rb_hash_aref(headers, rb_str_new2("Content-Length")) == Qnil && rb_hash_aref(headers, rb_str_new2("Transfer-Encoding")) == Qnil ) {
+      rb_hash_aset(headers, rb_str_new2("Transfer-Encoding"), rb_str_new2("chunked"));
+    }
+    else if( rb_hash_aref(headers, rb_str_new2("Content-Length")) ) {
+      VALUE size = rb_funcall(rb_hash_aref(headers, rb_str_new2("Content-Length")), rb_intern("to_i"), 0);
+      infile_size = size;
+    }
+  }
+  else if (!NIL_P(data) && rb_respond_to(data, rb_intern("to_s"))) {
+    infile_size = LONG2NUM(RSTRING_LEN(upload_stream));
+    if( rb_hash_aref(headers, rb_str_new2("Expect")) == Qnil ) {
+      rb_hash_aset(headers, rb_str_new2("Expect"), rb_str_new2(""));
+    }
+  }
+  else if (NIL_P(data)) {
+    /* Preserve legacy nil handling: configure an upload with no payload. */
+  }
+  else {
+    rb_raise(rb_eRuntimeError, "PUT data must respond to read or to_s");
+  }
+  rb_easy_set("headers",headers);
 
   upload = ruby_curl_upload_new(cCurlUpload);
   ruby_curl_upload_stream_set(upload, upload_stream);
@@ -1406,52 +1457,9 @@ static VALUE ruby_curl_easy_put_data_set(VALUE self, VALUE data) {
   curl_easy_setopt(curl, CURLOPT_SEEKDATA, rbce);
 #endif
 
-  /*
-   * we need to set specific headers for the PUT to work... so
-   * convert the internal headers structure to a HASH if one is set
-   */
-  if (!rb_easy_nil("headers")) {
-    if (rb_easy_type_check("headers", T_ARRAY) || rb_easy_type_check("headers", T_STRING)) {
-      rb_raise(rb_eRuntimeError, "Must set headers as a HASH to modify the headers in an PUT request");
-    }
+  if (!NIL_P(infile_size)) {
+    curl_easy_setopt(curl, CURLOPT_INFILESIZE, NUM2LONG(infile_size));
   }
-
-  // exit fast if the payload is empty
-  if (NIL_P(data)) { return data; }
-
-  headers = rb_easy_get("headers");
-  if( headers == Qnil ) {
-    headers = rb_hash_new();
-  }
-
-  if (rb_respond_to(data, rb_intern("read"))) {
-    VALUE stat = rb_funcall(data, rb_intern("stat"), 0);
-    if( stat && rb_hash_aref(headers, rb_str_new2("Content-Length")) == Qnil) {
-      VALUE size;
-      if( rb_hash_aref(headers, rb_str_new2("Expect")) == Qnil ) {
-        rb_hash_aset(headers, rb_str_new2("Expect"), rb_str_new2(""));
-      }
-      size = rb_funcall(stat, rb_intern("size"), 0);
-      curl_easy_setopt(curl, CURLOPT_INFILESIZE, NUM2LONG(size));
-    }
-    else if( rb_hash_aref(headers, rb_str_new2("Content-Length")) == Qnil && rb_hash_aref(headers, rb_str_new2("Transfer-Encoding")) == Qnil ) {
-      rb_hash_aset(headers, rb_str_new2("Transfer-Encoding"), rb_str_new2("chunked"));
-    }
-    else if( rb_hash_aref(headers, rb_str_new2("Content-Length")) ) {
-      VALUE size = rb_funcall(rb_hash_aref(headers, rb_str_new2("Content-Length")), rb_intern("to_i"), 0);
-      curl_easy_setopt(curl, CURLOPT_INFILESIZE, NUM2LONG(size));
-    }
-  }
-  else if (rb_respond_to(data, rb_intern("to_s"))) {
-    curl_easy_setopt(curl, CURLOPT_INFILESIZE, RSTRING_LEN(upload_stream));
-    if( rb_hash_aref(headers, rb_str_new2("Expect")) == Qnil ) {
-      rb_hash_aset(headers, rb_str_new2("Expect"), rb_str_new2(""));
-    }
-  }
-  else {
-    rb_raise(rb_eRuntimeError, "PUT data must respond to read or to_s");
-  }
-  rb_easy_set("headers",headers);
 
   // if we made it this far, all should be well.
   return data;
@@ -2767,7 +2775,7 @@ static VALUE cb_each_ftp_command(VALUE ftp_command, VALUE wrap, int _c, const VA
   TypedData_Get_Struct(wrap, struct curl_slist *, &curl_slist_ptr_type, list);
 
   ftp_command_string = rb_obj_as_string(ftp_command);
-  struct curl_slist *new_list = curl_slist_append(*list, StringValuePtr(ftp_command));
+  struct curl_slist *new_list = curl_slist_append(*list, StringValuePtr(ftp_command_string));
   if (!new_list) {
     rb_raise(rb_eNoMemError, "Failed to append to FTP command list");
   }
@@ -2785,7 +2793,7 @@ static VALUE cb_each_resolve(VALUE resolve, VALUE wrap, int _c, const VALUE *_pt
   TypedData_Get_Struct(wrap, struct curl_slist *, &curl_slist_ptr_type, list);
 
   resolve_string = rb_obj_as_string(resolve);
-  struct curl_slist *new_list = curl_slist_append(*list, StringValuePtr(resolve));
+  struct curl_slist *new_list = curl_slist_append(*list, StringValuePtr(resolve_string));
   if (!new_list) {
     rb_raise(rb_eNoMemError, "Failed to append to resolve list");
   }
@@ -3166,6 +3174,13 @@ VALUE ruby_curl_easy_setup(ruby_curl_easy *rbce) {
     if (rb_easy_type_check("resolve", T_ARRAY)) {
       VALUE wrap = TypedData_Wrap_Struct(rb_cObject, &curl_slist_ptr_type, rslv);
       rb_block_call(rb_easy_get("resolve"), rb_intern("each"), 0, NULL, cb_each_resolve, wrap);
+    } else {
+      VALUE resolve_str = rb_obj_as_string(rb_easy_get("resolve"));
+      struct curl_slist *new_list = curl_slist_append(*rslv, StringValuePtr(resolve_str));
+      if (!new_list) {
+        rb_raise(rb_eNoMemError, "Failed to append to resolve list");
+      }
+      *rslv = new_list;
     }
 
     if (*rslv) {
@@ -3222,6 +3237,44 @@ VALUE ruby_curl_easy_cleanup( VALUE self, ruby_curl_easy *rbce ) {
   return Qnil;
 }
 
+struct easy_perform_request_restore_args {
+  VALUE self;
+  CURL *curl;
+  ruby_curl_easy *rbce;
+  int clear_customrequest;
+  int clear_nobody;
+  int clear_postfields;
+};
+
+static VALUE perform_with_request_restore_body(VALUE argp) {
+  struct easy_perform_request_restore_args *args = (struct easy_perform_request_restore_args *)argp;
+  return rb_funcall(args->self, rb_intern("perform"), 0);
+}
+
+static VALUE perform_with_request_restore_ensure(VALUE argp) {
+  struct easy_perform_request_restore_args *args = (struct easy_perform_request_restore_args *)argp;
+
+  if (args->curl) {
+    if (args->clear_nobody) {
+      curl_easy_setopt(args->curl, CURLOPT_NOBODY, 0L);
+    }
+    if (args->clear_customrequest) {
+      curl_easy_setopt(args->curl, CURLOPT_CUSTOMREQUEST, NULL);
+    }
+    if (args->clear_postfields) {
+      curl_easy_setopt(args->curl, CURLOPT_POST, 0L);
+      curl_easy_setopt(args->curl, CURLOPT_POSTFIELDS, NULL);
+      curl_easy_setopt(args->curl, CURLOPT_POSTFIELDSIZE, 0L);
+      curl_easy_setopt(args->curl, CURLOPT_HTTPGET, 1L);
+      if (args->rbce && !NIL_P(args->rbce->opts)) {
+        rb_hash_delete(args->rbce->opts, rb_easy_hkey("postdata_buffer"));
+      }
+    }
+  }
+
+  return Qnil;
+}
+
 /*
  * Common implementation of easy.http(verb) and easy.http_delete
  */
@@ -3254,13 +3307,9 @@ static VALUE ruby_curl_easy_perform_verb_str(VALUE self, const char *verb) {
     curl_easy_setopt(curl, CURLOPT_POST, 0L);
   }
 
-  retval = rb_funcall(self, rb_intern("perform"), 0);
-
-  /* Restore state after request. */
-  if (is_head) {
-    curl_easy_setopt(curl, CURLOPT_NOBODY, 0L);
-  }
-  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, NULL);
+  struct easy_perform_request_restore_args restore_args = { self, curl, rbce, 1, is_head, 0 };
+  retval = rb_ensure(perform_with_request_restore_body, (VALUE)&restore_args,
+                     perform_with_request_restore_ensure, (VALUE)&restore_args);
 
   return retval;
 }
@@ -3418,7 +3467,9 @@ static VALUE ruby_curl_easy_perform_post(int argc, VALUE *argv, VALUE self) {
         ruby_curl_easy_post_body_set(self, post_body);
       }
 
-      return rb_funcall(self, rb_intern("perform"), 0);
+      struct easy_perform_request_restore_args restore_args = { self, curl, rbce, 1, 0, 0 };
+      return rb_ensure(perform_with_request_restore_body, (VALUE)&restore_args,
+                       perform_with_request_restore_ensure, (VALUE)&restore_args);
     }
   }
 }
@@ -3472,7 +3523,9 @@ static VALUE ruby_curl_easy_perform_patch(int argc, VALUE *argv, VALUE self) {
       if (rb_easy_nil("postdata_buffer")) {
         ruby_curl_easy_post_body_set(self, patch_body);
       }
-      return rb_funcall(self, rb_intern("perform"), 0);
+      struct easy_perform_request_restore_args restore_args = { self, curl, rbce, 1, 0, 1 };
+      return rb_ensure(perform_with_request_restore_body, (VALUE)&restore_args,
+                       perform_with_request_restore_ensure, (VALUE)&restore_args);
     }
   }
 }
@@ -3523,7 +3576,9 @@ static VALUE ruby_curl_easy_perform_put(int argc, VALUE *argv, VALUE self) {
       ruby_curl_easy_put_data_set(self, post_body);
     }
   }
-  return rb_funcall(self, rb_intern("perform"), 0);
+  struct easy_perform_request_restore_args restore_args = { self, curl, rbce, 1, 0, 0 };
+  return rb_ensure(perform_with_request_restore_body, (VALUE)&restore_args,
+                   perform_with_request_restore_ensure, (VALUE)&restore_args);
 }
 
 
@@ -4590,6 +4645,7 @@ static VALUE ruby_curl_easy_set_opt(VALUE self, VALUE opt, VALUE val) {
     }
     /* Save the list pointer in the ruby_curl_easy structure for cleanup later */
     rbce->curl_resolve = list;
+    rb_hash_aset(rbce->opts, rb_easy_hkey("resolve"), val);
     curl_easy_setopt(rbce->curl, CURLOPT_RESOLVE, list);
   } break;
 #endif

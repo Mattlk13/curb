@@ -133,6 +133,62 @@ class TestCurbCurlMulti < Test::Unit::TestCase
     Curl::Multi.autoclose = false
   end
 
+  def test_close_inside_completion_callback_is_rejected_without_invalidating_multi
+    multi = Curl::Multi.new
+    easy = Curl::Easy.new(TestServlet.url)
+
+    easy.on_complete { multi.close }
+    multi.add(easy)
+
+    error = assert_raise(Curl::Err::AbortedByCallbackError) { multi.perform }
+    assert_match(/Cannot close an active Curl::Multi handle/, error.message)
+    assert multi.idle?
+    assert_equal({}, multi.requests)
+
+    easy.on_complete { |_curl| }
+    multi.add(easy)
+    multi.perform
+
+    assert_equal "GET", easy.body_str
+  ensure
+    multi.close if defined?(multi) && multi
+  end
+
+  def test_close_inside_perform_block_is_rejected_without_invalidating_multi
+    multi = Curl::Multi.new
+    easy = Curl::Easy.new(TestServlet.url)
+    multi.add(easy)
+
+    error = assert_raise(RuntimeError) do
+      multi.perform { multi.close }
+    end
+    assert_match(/Cannot close an active Curl::Multi handle/, error.message)
+
+    assert_nothing_raised { multi.close }
+    multi = nil
+  ensure
+    multi.close if defined?(multi) && multi
+  end
+
+  def test_active_easy_cannot_be_added_to_another_multi
+    first_multi = Curl::Multi.new
+    second_multi = Curl::Multi.new
+    easy = Curl::Easy.new(TestServlet.url)
+
+    first_multi.add(easy)
+
+    error = assert_raise(RuntimeError) { second_multi.add(easy) }
+    assert_match(/active Curl::Easy/, error.message)
+    assert_same first_multi, easy.multi
+    assert_equal easy, first_multi.requests[easy.object_id]
+
+    assert_nothing_raised { first_multi.close }
+    first_multi = nil
+  ensure
+    first_multi.close if defined?(first_multi) && first_multi
+    second_multi.close if defined?(second_multi) && second_multi
+  end
+
   def test_close_makes_multi_unusable
     multi = Curl::Multi.new
     multi.close

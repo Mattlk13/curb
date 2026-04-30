@@ -28,6 +28,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdarg.h>
 
 /*
@@ -52,9 +53,7 @@
   #include <fcntl.h>
 #endif
 
-#if 0 /* disabled curl_multi_wait in favor of scheduler-aware fdsets */
-#include <stdint.h>  /* for intptr_t */
-
+#if defined(HAVE_CURL_MULTI_WAIT) && !defined(HAVE_RB_THREAD_FD_SELECT)
 struct wait_args {
   CURLM *handle;
   long timeout_ms;
@@ -95,6 +94,34 @@ static void rb_curl_multi_remove_request_reference(VALUE self, VALUE easy);
 static VALUE ruby_curl_multi_mark_closed(VALUE self);
 static VALUE ruby_curl_multi_alloc(VALUE klass);
 static VALUE ruby_curl_multi_initialize(VALUE self);
+static VALUE ruby_curl_multi_perform_impl(int argc, VALUE *argv, VALUE self);
+#if defined(HAVE_CURL_MULTI_SOCKET_ACTION) && defined(HAVE_CURLMOPT_SOCKETFUNCTION) && defined(HAVE_CURLMOPT_TIMERFUNCTION) && defined(HAVE_RB_THREAD_FD_SELECT) && !defined(_WIN32)
+static VALUE ruby_curl_multi_socket_perform_impl(int argc, VALUE *argv, VALUE self);
+#endif
+
+static ruby_curl_multi *ruby_curl_multi_pointer_if_compatible(VALUE multi_val) {
+  if (NIL_P(multi_val) || !RB_TYPE_P(multi_val, T_DATA)) {
+    return NULL;
+  }
+
+#if defined(RTYPEDDATA_P) && defined(RTYPEDDATA_TYPE) && defined(RTYPEDDATA_DATA)
+  if (!RTYPEDDATA_P(multi_val)) {
+    return NULL;
+  }
+
+  if (RTYPEDDATA_TYPE(multi_val) != &ruby_curl_multi_data_type) {
+    return NULL;
+  }
+
+  return (ruby_curl_multi *)RTYPEDDATA_DATA(multi_val);
+#else
+  if (!rb_typeddata_is_kind_of(multi_val, &ruby_curl_multi_data_type)) {
+    return NULL;
+  }
+
+  return DATA_PTR(multi_val);
+#endif
+}
 
 static VALUE callback_exception(VALUE did_raise, VALUE exception) {
   // TODO: we could have an option to enable exception reporting
@@ -342,6 +369,9 @@ static void ruby_curl_multi_init(ruby_curl_multi *rbcm) {
   rbcm->active = 0;
   rbcm->running = 0;
   rbcm->closed = 0;
+  rbcm->perform_active = 0;
+  rbcm->callback_active = 0;
+  rbcm->allow_close_during_perform = 0;
 
   if (rbcm->attached) {
     st_free_table(rbcm->attached);
@@ -537,10 +567,20 @@ VALUE ruby_curl_multi_add(VALUE self, VALUE easy) {
   CURLMcode mcode;
   ruby_curl_easy *rbce;
   ruby_curl_multi *rbcm;
+  ruby_curl_multi *existing_rbcm;
 
   TypedData_Get_Struct(self, ruby_curl_multi, &ruby_curl_multi_data_type, rbcm);
   TypedData_Get_Struct(easy, ruby_curl_easy, &ruby_curl_easy_data_type, rbce);
   ruby_curl_multi_ensure_handle(rbcm);
+
+  if (rb_curl_multi_has_easy(rbcm, rbce)) {
+    return self;
+  }
+
+  existing_rbcm = ruby_curl_multi_pointer_if_compatible(rbce->multi);
+  if (existing_rbcm && existing_rbcm != rbcm && rb_curl_multi_has_easy(existing_rbcm, rbce)) {
+    rb_raise(rb_eRuntimeError, "Cannot add an active Curl::Easy handle to another Curl::Multi");
+  }
 
   /* setup the easy handle */
   ruby_curl_easy_setup( rbce );
@@ -797,6 +837,8 @@ static VALUE rb_curl_multi_run_completion_callbacks(VALUE argp) {
   VALUE did_raise = rb_hash_new();
   long redirect_count;
 
+  args->rbcm->callback_active = 1;
+
   easy_callback_error = take_easy_callback_error_if_any(args->easy);
   if (!NIL_P(easy_callback_error)) {
     stash_multi_exception_if_unset(args->self, easy_callback_error, args->easy);
@@ -875,6 +917,10 @@ static VALUE rb_curl_multi_finish_completion_callbacks(VALUE argp) {
 
   if (args->rbce->callback_active) {
     args->rbce->callback_active = 0;
+  }
+
+  if (args->rbcm) {
+    args->rbcm->callback_active = 0;
   }
 
   if (args->rbce->multi == args->self && !rb_curl_multi_has_easy(args->rbcm, args->rbce)) {
@@ -1415,7 +1461,7 @@ static VALUE ruby_curl_multi_socket_drive_ensure(VALUE argp) {
   return Qnil;
 }
 
-VALUE ruby_curl_multi_socket_perform(int argc, VALUE *argv, VALUE self) {
+static VALUE ruby_curl_multi_socket_perform_impl(int argc, VALUE *argv, VALUE self) {
   ruby_curl_multi *rbcm;
   VALUE block = Qnil;
   rb_scan_args(argc, argv, "0&", &block);
@@ -1445,7 +1491,11 @@ VALUE ruby_curl_multi_socket_perform(int argc, VALUE *argv, VALUE self) {
   /* finalize */
   rb_curl_multi_read_info(self, rbcm->handle);
   rb_curl_multi_yield_if_given(self, block);
-  if (cCurlMutiAutoClose == 1) rb_funcall(self, rb_intern("_autoclose"), 0);
+  if (cCurlMutiAutoClose == 1) {
+    rbcm->allow_close_during_perform = 1;
+    rb_funcall(self, rb_intern("_autoclose"), 0);
+    rbcm->allow_close_during_perform = 0;
+  }
 
   return Qtrue;
 }
@@ -1493,6 +1543,14 @@ static VALUE curb_select(void *args) {
   int rc = select(set->maxfd, set->fdread, set->fdwrite, set->fdexcep, set->tv);
   return INT2FIX(rc);
 }
+
+#ifdef HAVE_RB_THREAD_CALL_WITHOUT_GVL
+static void *curb_select_without_gvl(void *args) {
+  struct _select_set* set = args;
+  int rc = select(set->maxfd, set->fdread, set->fdwrite, set->fdexcep, set->tv);
+  return (void *)(intptr_t)rc;
+}
+#endif
 #endif
 
 /*
@@ -1510,7 +1568,7 @@ static VALUE curb_select(void *args) {
  *
  * Run multi handles, looping selecting when data can be transfered
  */
-VALUE ruby_curl_multi_perform(int argc, VALUE *argv, VALUE self) {
+static VALUE ruby_curl_multi_perform_impl(int argc, VALUE *argv, VALUE self) {
   CURLMcode mcode;
   ruby_curl_multi *rbcm;
   int maxfd, rc = -1;
@@ -1691,7 +1749,7 @@ VALUE ruby_curl_multi_perform(int argc, VALUE *argv, VALUE self) {
         rb_fd_term(&efds);
       }
 #elif defined(HAVE_RB_THREAD_CALL_WITHOUT_GVL)
-      rc = (int)(VALUE) rb_thread_call_without_gvl((void *(*)(void *))curb_select, &fdset_args, RUBY_UBF_IO, 0);
+      rc = (int)(intptr_t) rb_thread_call_without_gvl(curb_select_without_gvl, &fdset_args, RUBY_UBF_IO, 0);
 #elif HAVE_RB_THREAD_BLOCKING_REGION
       rc = rb_thread_blocking_region(curb_select, &fdset_args, RUBY_UBF_IO, 0);
 #else
@@ -1725,10 +1783,65 @@ VALUE ruby_curl_multi_perform(int argc, VALUE *argv, VALUE self) {
   rb_curl_multi_read_info( self, rbcm->handle );
   rb_curl_multi_yield_if_given(self, block);
   if (cCurlMutiAutoClose  == 1) {
+    rbcm->allow_close_during_perform = 1;
     rb_funcall(self, rb_intern("_autoclose"), 0);
+    rbcm->allow_close_during_perform = 0;
   }
   return Qtrue;
 }
+
+struct multi_perform_call_args {
+  int argc;
+  VALUE *argv;
+  VALUE self;
+  VALUE result;
+  VALUE (*func)(int, VALUE *, VALUE);
+};
+
+static VALUE ruby_curl_multi_perform_guard_body(VALUE argp) {
+  struct multi_perform_call_args *args = (struct multi_perform_call_args *)argp;
+  args->result = args->func(args->argc, args->argv, args->self);
+  return args->result;
+}
+
+static VALUE ruby_curl_multi_perform_guard_ensure(VALUE self) {
+  ruby_curl_multi *rbcm;
+  TypedData_Get_Struct(self, ruby_curl_multi, &ruby_curl_multi_data_type, rbcm);
+  rbcm->perform_active = 0;
+  rbcm->callback_active = 0;
+  rbcm->allow_close_during_perform = 0;
+  return Qnil;
+}
+
+static VALUE ruby_curl_multi_with_perform_guard(int argc, VALUE *argv, VALUE self, VALUE (*func)(int, VALUE *, VALUE)) {
+  ruby_curl_multi *rbcm;
+  struct multi_perform_call_args args;
+
+  TypedData_Get_Struct(self, ruby_curl_multi, &ruby_curl_multi_data_type, rbcm);
+  if (rbcm->perform_active) {
+    rb_raise(rb_eRuntimeError, "Cannot recursively perform an active Curl::Multi handle");
+  }
+
+  rbcm->perform_active = 1;
+  args.argc = argc;
+  args.argv = argv;
+  args.self = self;
+  args.result = Qnil;
+  args.func = func;
+
+  return rb_ensure(ruby_curl_multi_perform_guard_body, (VALUE)&args,
+                   ruby_curl_multi_perform_guard_ensure, self);
+}
+
+VALUE ruby_curl_multi_perform(int argc, VALUE *argv, VALUE self) {
+  return ruby_curl_multi_with_perform_guard(argc, argv, self, ruby_curl_multi_perform_impl);
+}
+
+#if defined(HAVE_CURL_MULTI_SOCKET_ACTION) && defined(HAVE_CURLMOPT_SOCKETFUNCTION) && defined(HAVE_CURLMOPT_TIMERFUNCTION) && defined(HAVE_RB_THREAD_FD_SELECT) && !defined(_WIN32)
+VALUE ruby_curl_multi_socket_perform(int argc, VALUE *argv, VALUE self) {
+  return ruby_curl_multi_with_perform_guard(argc, argv, self, ruby_curl_multi_socket_perform_impl);
+}
+#endif
 
 /*
  * call-seq:
@@ -1740,6 +1853,11 @@ VALUE ruby_curl_multi_perform(int argc, VALUE *argv, VALUE self) {
 VALUE ruby_curl_multi_close(VALUE self) {
   ruby_curl_multi *rbcm;
   TypedData_Get_Struct(self, ruby_curl_multi, &ruby_curl_multi_data_type, rbcm);
+
+  if ((rbcm->perform_active || rbcm->callback_active) && !rbcm->allow_close_during_perform) {
+    rb_raise(rb_eRuntimeError, "Cannot close an active Curl::Multi handle during perform");
+  }
+
   rb_curl_multi_detach_all(rbcm);
 
   if (rbcm->handle) {

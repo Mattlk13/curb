@@ -22,5 +22,18 @@ class TestCurbFtpOptions < Test::Unit::TestCase
     assert_kind_of(Array, c.ftp_commands)
     assert_equal ["PWD", "CWD /"], c.ftp_commands
   end
-end
 
+  def test_ftp_command_entries_can_be_objects_that_convert_to_string
+    command = Object.new
+    command.define_singleton_method(:to_s) { "PWD" }
+
+    c = Curl::Easy.new($TEST_URL)
+    c.ftp_commands = [command]
+    m = Curl::Multi.new
+
+    assert_nothing_raised { m.add(c) }
+  ensure
+    m.remove(c) if defined?(m) && m && m.requests[c.object_id]
+    m.close if defined?(m) && m
+  end
+end
