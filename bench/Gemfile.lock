@@ -1,8 +1,8 @@
 GEM
   remote: http://rubygems.org/
   specs:
-    addressable (2.8.0)
-      public_suffix (>= 2.0.2, < 5.0)
+    addressable (2.9.0)
+      public_suffix (>= 2.0.2, < 8.0)
     connection_pool (2.2.5)
     cookiejar (0.3.3)
     curb (1.0.0)
@@ -22,7 +22,7 @@ GEM
     net-http-persistent (4.0.1)
       connection_pool (~> 2.2)
     patron (0.13.3)
-    public_suffix (4.0.6)
+    public_suffix (7.0.5)
     rake (13.0.6)
     rmem (1.0.0)
     typhoeus (1.4.0)
